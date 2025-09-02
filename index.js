@@ -5,50 +5,58 @@ import puppeteer from "puppeteer";
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
-// --- auth ---
+// ---- auth ----
 function isAuthorized(req, bodyToken) {
   const auth = req.headers["authorization"] || "";
   const envToken = process.env.RENDER_TOKEN || "";
   const basicUser = process.env.BASIC_USER || "";
   const basicPass = process.env.BASIC_PASS || "";
 
+  // Bearer
   if (envToken && auth.startsWith("Bearer ")) {
     const tok = auth.slice(7).trim();
-    if (tok === envToken) return true;
+    if (tok && tok === envToken) return true;
   }
+  // Basic
   if (basicUser && basicPass && auth.startsWith("Basic ")) {
     try {
-      const [u, p] = Buffer.from(auth.slice(6), "base64").toString("utf8").split(":");
+      const [u, p] = Buffer.from(auth.slice(6), "base64")
+        .toString("utf8")
+        .split(":");
       if (u === basicUser && p === basicPass) return true;
     } catch {}
   }
+  // Fallback body token
   if (envToken && bodyToken && bodyToken === envToken) return true;
 
-  return !envToken && !(basicUser || basicPass); // open if no secrets set
+  // If no secrets configured, allow
+  return !envToken && !(basicUser || basicPass);
 }
 
 app.get("/healthz", (_req, res) => res.status(200).send("ok"));
 
+// ---- HTML -> PDF ----
 app.post("/pdf", async (req, res) => {
   const {
     url,
-    // PDF options (use your own @page from CSS; format is optional)
-    format,                   // e.g. "A4" (omit to rely on @page)
-    margin = "10mm",          // set to "0" if @page defines margins
+
+    // PDF options (let your @page control size/margins if possible)
+    format,                    // omit to rely on @page
+    margin = "0",              // set "0" so @page margins apply
     scale = 1.0,
     displayHeaderFooter = false,
     headerTemplate,
     footerTemplate,
-    preferCSSPageSize = true, // respect @page size like Chrome Print
+    preferCSSPageSize = true,  // key to mirror Chrome Print
 
     // Navigation / rendering
     wait = "networkidle0",
-    timeout_ms = 60000,
-    emulateMedia = "print",   // key: use print styles
-    viewport = { width: 1280, height: 1600, deviceScaleFactor: 2 },
+    timeout_ms = 90000,
+    emulateMedia = "print",
+    viewport = { width: 1280, height: 1800, deviceScaleFactor: 2 },
     cookies = [],
-    readySelector,            // optional: "#resume-root.ready"
-    readyFunction             // optional: "window.c4jReady===true"
+    readySelector,             // optional: "#resume-root.ready"
+    readyFunction              // optional: "window.c4jReady===true"
   } = req.body || {};
 
   if (!isAuthorized(req, req.body?.token)) return res.status(401).send("unauthorized");
@@ -56,7 +64,9 @@ app.post("/pdf", async (req, res) => {
 
   let browser;
   try {
-    browser = await puppeteer.launch({ args: ["--no-sandbox", "--disable-setuid-sandbox"] });
+    browser = await puppeteer.launch({
+      args: ["--no-sandbox", "--disable-setuid-sandbox"]
+    });
     const page = await browser.newPage();
 
     if (viewport) await page.setViewport(viewport);
@@ -68,12 +78,29 @@ app.post("/pdf", async (req, res) => {
 
     await page.goto(url, { waitUntil: wait, timeout: timeout_ms });
 
-    // Ensure fonts and late JS are ready (Chrome Print behavior)
-    try {
-      await page.evaluate(async () => {
-        if (document.fonts && document.fonts.ready) await document.fonts.ready;
+    // Make headless behave like Chrome Print
+    await page.evaluate(async () => {
+      // Fire beforeprint hooks some themes/addons rely on
+      try { window.dispatchEvent(new Event("beforeprint")); } catch {}
+
+      // Disable lazyload so offscreen images load
+      document.querySelectorAll('img[loading="lazy"]').forEach(img => {
+        img.setAttribute("loading", "eager");
+        img.decoding = "sync";
       });
-    } catch {}
+
+      // Wait for all images to complete
+      await Promise.all(Array.from(document.images).map(img => {
+        if (img.complete) return;
+        return new Promise(res => { img.onload = img.onerror = res; });
+      }));
+
+      // Ensure web fonts are loaded
+      try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch {}
+
+      // Small settle
+      await new Promise(r => setTimeout(r, 50));
+    });
 
     if (readySelector) await page.waitForSelector(readySelector, { timeout: timeout_ms });
     if (readyFunction) await page.waitForFunction(readyFunction, { timeout: timeout_ms });
@@ -87,7 +114,7 @@ app.post("/pdf", async (req, res) => {
       headerTemplate,
       footerTemplate
     };
-    if (format) opts.format = format; // only if you explicitly pass it
+    if (format) opts.format = format; // only if you explicitly provide it
 
     const pdf = await page.pdf(opts);
 
@@ -102,7 +129,10 @@ app.post("/pdf", async (req, res) => {
   }
 });
 
+// ---- root ----
 app.get("/", (_req, res) => res.status(200).send("pdf-renderer ready"));
 
 const port = process.env.PORT || 8080;
-app.listen(port, () => console.log(`pdf-renderer listening on ${port}`));
+app.listen(port, () => {
+  console.log(`pdf-renderer listening on ${port}`);
+});
