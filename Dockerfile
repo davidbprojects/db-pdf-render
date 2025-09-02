@@ -1,16 +1,14 @@
 FROM ghcr.io/puppeteer/puppeteer:22.15.0
 
 WORKDIR /app
+USER root
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN mkdir -p /app && chown -R pptruser:pptruser /app
+USER pptruser
+# Use lockfile if present, else fallback
+RUN npm ci --omit=dev || npm install --omit=dev --no-audit --no-fund
 
-COPY index.js ./
-
+COPY --chown=pptruser:pptruser index.js ./
 ENV NODE_ENV=production
-# Secrets provided by Cloud Run:
-#  - RENDER_TOKEN (optional if Basic auth used)
-#  - BASIC_USER (optional)
-#  - BASIC_PASS (optional)
-
 EXPOSE 8080
 CMD ["node","index.js"]
